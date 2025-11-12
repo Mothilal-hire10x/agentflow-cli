@@ -7,7 +7,7 @@ from agentflow.checkpointer import BaseCheckpointer
 from agentflow.graph import CompiledGraph
 from agentflow.state import AgentState, Message, StreamChunk, StreamEvent
 from agentflow.utils.thread_info import ThreadInfo
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from injectq import InjectQ, inject, singleton
 from pydantic import BaseModel
 from starlette.responses import Content
@@ -21,6 +21,7 @@ from agentflow_cli.src.app.routers.graph.schemas.graph_schemas import (
     GraphSetupSchema,
 )
 from agentflow_cli.src.app.utils import DummyThreadNameGenerator, ThreadNameGenerator
+from agentflow_cli.src.app.utils.file_helper import FileHelper
 
 
 @singleton
@@ -39,6 +40,7 @@ class GraphService:
         checkpointer: BaseCheckpointer,
         config: GraphConfig,
         thread_name_generator: ThreadNameGenerator | None = None,
+        file_helper: FileHelper | None = None,
     ):
         """
         Initializes the GraphService with a CompiledGraph instance.
@@ -46,11 +48,15 @@ class GraphService:
         Args:
             graph (CompiledGraph): An instance of CompiledGraph for
                                    graph execution operations.
+            checkpointer (BaseCheckpointer): Checkpointer for state management.
+            config (GraphConfig): Configuration for graph operations.
+            thread_name_generator (ThreadNameGenerator, optional): Generator for thread names.
         """
         self._graph = graph
         self.config = config
         self.checkpointer = checkpointer
         self.thread_name_generator = thread_name_generator
+        self.file_helper = file_helper
 
     async def _save_thread_name(
         self,
@@ -198,12 +204,15 @@ class GraphService:
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
+        files: list[UploadFile] | None = None,
     ) -> GraphInvokeOutputSchema:
         """
         Invokes the graph with the provided input and returns the final result.
 
         Args:
             graph_input (GraphInputSchema): The input data for graph execution.
+            user (dict): User information for context.
+            files (list[UploadFile], optional): List of uploaded files to process.
 
         Returns:
             GraphInvokeOutputSchema: The final result from graph execution.
@@ -218,6 +227,11 @@ class GraphService:
             input_data, config, meta = await self._prepare_input(graph_input)
             # add user inside config
             config["user"] = user
+
+            if files and self.file_helper:
+                logger.info(f"Processing {len(files)} uploaded files")
+                extracted_texts = await self.file_helper.prepare_text_from_files(files)
+                logger.debug(f"Extracted texts from files: {extracted_texts}")
 
             # if its a new thread then save the thread into db
             await self._save_thread(config, config["thread_id"])
@@ -261,13 +275,15 @@ class GraphService:
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
+        files: list[UploadFile] | None = None,
     ) -> AsyncIterable[Content]:
         """
         Streams the graph execution with the provided input.
 
         Args:
             graph_input (GraphInputSchema): The input data for graph execution.
-            stream_mode (str): The stream mode ("values", "updates", "messages", etc.).
+            user (dict): User information for context.
+            files (list[UploadFile], optional): List of uploaded files to process.
 
         Yields:
             GraphStreamChunkSchema: Individual chunks from graph execution.
@@ -278,10 +294,14 @@ class GraphService:
         try:
             logger.debug(f"Streaming graph with input: {graph_input.messages}")
 
-            # Prepare the config
             input_data, config, meta = await self._prepare_input(graph_input)
-            # add user inside config
             config["user"] = user
+
+            if files and self.file_helper:
+                logger.info(f"Processing {len(files)} uploaded files for streaming")
+                extracted_texts = await self.file_helper.prepare_text_from_files(files)
+                logger.debug(f"Extracted texts from files: {extracted_texts}")
+
             await self._save_thread(config, config["thread_id"])
 
             messages_str = []
@@ -421,10 +441,9 @@ class GraphService:
                 "removed_count": 1,
                 "state": state.model_dump_json(),
             }
-        else:
-            logger.warning(
-                "Last message is not an assistant message with tool calls, skipping it from checks."
-            )
+        logger.warning(
+            "Last message is not an assistant message with tool calls, skipping it from checks."
+        )
 
         return {
             "success": True,

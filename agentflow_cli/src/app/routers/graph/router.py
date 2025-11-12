@@ -1,7 +1,8 @@
 from typing import Any
 
+import orjson
 from agentflow.state import StreamChunk
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Form, Request, UploadFile
 from fastapi.logger import logger
 from fastapi.responses import StreamingResponse
 from injectq.integrations import InjectAPI
@@ -34,20 +35,20 @@ router = APIRouter(
 )
 async def invoke_graph(
     request: Request,
-    graph_input: GraphInputSchema,
+    graph_input: str = Form(...),
+    files: list[UploadFile] | None = None,
     service: GraphService = InjectAPI(GraphService),
     user: dict[str, Any] = Depends(verify_current_user),
 ):
     """
     Invoke the graph with the provided input and return the final result.
     """
+    data = orjson.loads(graph_input)
+    graph_input = GraphInputSchema(**data)
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
     logger.debug(f"User info: {user}")
 
-    result: GraphInvokeOutputSchema = await service.invoke_graph(
-        graph_input,
-        user,
-    )
+    result: GraphInvokeOutputSchema = await service.invoke_graph(graph_input, user, files)
 
     logger.info("Graph invoke completed successfully")
 
@@ -65,18 +66,23 @@ async def invoke_graph(
     openapi_extra={},
 )
 async def stream_graph(
-    graph_input: GraphInputSchema,
+    request: Request,
+    graph_input: str = Form(...),
+    files: list[UploadFile] | None = None,
     service: GraphService = InjectAPI(GraphService),
     user: dict[str, Any] = Depends(verify_current_user),
 ):
     """
     Stream the graph execution with real-time output.
     """
-    logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
+    data = orjson.loads(graph_input)
+    graph_input_schema = GraphInputSchema(**data)
+    logger.info(f"Graph stream request received with {len(graph_input_schema.messages)} messages")
 
-    result = service.stream_graph(
-        graph_input,
+    result = await service.stream_graph(
+        graph_input_schema,
         user,
+        files,
     )
 
     return StreamingResponse(
